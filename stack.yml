@@ -1,0 +1,223 @@
+- name : WEB LAYER
+  hosts : DEV
+  tags :
+    - WEB
+  become : yes
+  vars :
+    MOD_JK_URL : http://mirrors.wuchna.com/apachemirror/tomcat/tomcat-connectors/jk/tomcat-connectors-1.2.46-src.tar.gz
+  tasks :
+    - name : create MOD_JK_HOME variable 
+      shell : "echo {{MOD_JK_URL}} | awk -F / '{print $NF}' | sed -e 's/.tar.gz//g'"
+      register : out 
+    - name : print MOD_JK_HOME 
+      debug :
+        msg : "{{out}}"
+    - name : create MOD_JK_HOME variable 
+      set_fact : 
+        MOD_JK_HOME : "{{out.stdout}}"
+    - name : install apache server
+      yum :
+        name : httpd
+        state : latest
+      notify : 
+        - start httpd server 
+  handlers :
+    - name : start httpd server
+      service :
+        name : httpd
+        state : started 
+        enabled : yes 
+    ##- name : download MOD-JK 
+      ##get_url :
+        ##url : http://mirrors.wuchna.com/apachemirror/tomcat/tomcat-connectors/jk/tomcat-connectors-1.2.46-src.tar.gz
+        ##dest : /root/
+    - name : check MOD_JK_HOME statistics
+      stat :
+        path : "/root/{{MOD_JK_HOME}}"
+      register : sample
+    - name : extract the MOD-JK file
+      unarchive : 
+        src : "{{MOD_JK_URL}}"
+        dest : /root/
+        remote_src : yes
+      when : sample.stat.exists == false  
+    - name : install gcc and httpd-devel
+      yum :
+        name : "{{item}}"
+        state : latest
+      loop :
+        - gcc
+        - httpd-devel
+    - name : check mod_jk.so statistics 
+      stat :
+        path : /etc/httpd/modules/mod_jk.so
+      register : conf
+    - name : compiling mod-jk.so file 
+      shell : "{{item}}"
+      loop :
+        - ./configure --with-apxs=/bin/apxs
+        - make 
+        - make install 
+      args :
+        chdir : "/root/{{MOD_JK_HOME}}/native"
+      when : conf.stat.exists == false
+    - name : check modjk.conf statistics 
+      stat :
+        path : /etc/httpd/conf.d/modjk.conf
+      register : modjkconf
+    - name : create modjk.conf file
+      blockinfile :
+        path : /etc/httpd/conf.d/modjk.conf
+        block : |
+          LoadModule jk_module modules/mod_jk.so
+          JkWorkersFile conf.d/workers.properties
+          JkLogFile logs/mod_jk.log
+          JkLogLevel info
+          JkLogStampFormat "[%a %b %d %H:%M:%S %Y]"
+          JkOptions +ForwardKeySize +ForwardURICompat -ForwardDirectories
+          JkRequestLogFormat "%w %V %T"
+          JkMount /student tomcatA
+          JkMount /student/* tomcatA
+        create : yes
+      when : modjkconf.stat.exists == false
+    - name : check workers.properties statistics 
+      stat :
+        path : /etc/httpd/conf.d/workers.properties
+      register : workers
+    - name : copy workers.properties file
+      copy :
+        src : /tmp/workers.properties
+        dest : /etc/httpd/conf.d/
+      when : workers.stat.exists == false
+    - name : restart httpd serice 
+      service : 
+        name : httpd
+        state : restarted 
+- name : create APP LAYER
+  hosts : DEV
+  become : yes
+  tags :
+    - APP
+  vars :
+    USER_NAME : tomcat 
+    TOMCAT_URL : http://mirrors.wuchna.com/apachemirror/tomcat/tomcat-9/v9.0.14/bin/apache-tomcat-9.0.14.tar.gz
+  tasks :
+    - name : create TOMCAT_HOME Variable 
+      shell : "echo {{TOMCAT_URL}} | awk -F / '{print $NF}' | sed -e 's/.tar.gz//g'"
+      register : tomc
+    - name : print the output 
+      debug :
+        msg : "{{tomc}}"
+    - name : create TOMCAT_HOME variable 
+      set_fact : 
+        TOMCAT_HOME : "{{tomc.stdout}}"
+    - name : declare STUDENT and MYSQL variables
+      set_fact :
+        STUDENT :
+          URL : https://github.com/devops2k18/DevOpsAug/raw/master/APPSTACK/student.war
+          LOCATION : "/{{USER_NAME}}/{{TOMCAT_HOME}}/webapps"
+        MYSQL :
+          URL: https://github.com/devops2k18/DevOpsAug/raw/master/APPSTACK/mysql-connector-java-5.1.40.jar
+          LOCATION : "/{{USER_NAME}}/{{TOMCAT_HOME}}/lib"
+    - name : create user
+      user :
+        name : "{{USER_NAME}}"
+    - name : create TOMCAT directory
+      file :
+        path : "/{{USER_NAME}}" 
+        owner : "{{USER_NAME}}"
+        group : "{{USER_NAME}}"
+        mode : 0755
+        state : directory
+    - name : install java software 
+      yum :
+        name : java
+        state : latest 
+    - name : download and extract tomcat server
+      become_user : "{{USER_NAME}}"
+      unarchive :
+        src : "{{TOMCAT_URL}}"
+        dest : "/{{USER_NAME}}/"
+        remote_src : yes 
+    - name : update context.xml file 
+      blockinfile :
+        path : "/{{USER_NAME}}/{{TOMCAT_HOME}}/conf/context.xml"
+        block : |
+          <Resource name="jdbc/TestDB" auth="Container" type="javax.sql.DataSource" maxTotal="100" maxIdle="30" maxWaitMillis="10000" username="student" password="student@1" driverClassName="com.mysql.jdbc.Driver" url="jdbc:mysql://localhost:3306/studentapp"/>
+        insertbefore : </Context>
+    - name : cleanup webapps directory 
+      find :
+        paths : "/{{USER_NAME}}/{{TOMCAT_HOME}}/webapps"
+        file_type : any
+      register : webapp
+
+    - name : print the webapp output 
+      debug :
+        msg : "{{webapp}}"
+
+    - name : remove all from webapps
+      file :
+        path : "{{item.path}}"
+        state : absent 
+      loop :
+        "{{webapp.files}}"
+    - name : download STUDENT.war and MYSQL tomcat-connectors
+      become_user : "{{USER_NAME}}"
+      get_url :
+        url : "{{item.URL}}"
+        dest : "{{item.LOCATION}}"
+      loop :
+        - "{{STUDENT}}"
+        - "{{MYSQL}}"
+
+    - name : check the tomcat server status
+      shell : ps -ef | grep tomcat | grep -v grep
+      register : Tstatus 
+      ignore_errors : true 
+
+    - name : print the output 
+      debug : 
+        msg : "{{Tstatus}}"
+
+    - name : start the tomcat server
+      shell : "nohup sh startup.sh"
+      args :
+        chdir : "/{{USER_NAME}}/{{TOMCAT_HOME}}/bin"
+      when : Tstatus.rc != 0
+
+    - name : restart the tomcat server
+      shell : "nohup sh shutdown.sh && nohup sh startup.sh"
+      args :
+        chdir : "/{{USER_NAME}}/{{TOMCAT_HOME}}/bin"
+      when : Tstatus.rc == 0
+
+- name : create DB layer 
+  hosts : DEV
+  become : yes 
+  tags :
+    - DB 
+  tasks :
+    - name : install mariadb and mariadb-server
+      yum :
+        name : "{{item}}"
+        state : latest 
+      loop :
+        - mariadb
+        - mariadb-server 
+        - MySQL-python
+    - name : start mariadb server
+      service : 
+        name : mariadb
+        state : started 
+        enabled : yes 
+
+    - name : copy sql query
+      copy :
+        src : /tmp/studentapp.sql
+        dest : /tmp/studentapp.sql
+
+    - name : create schema,tables 
+      mysql_db :
+        state : import
+        name : all
+        target : /tmp/studentapp.sql
